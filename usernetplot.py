@@ -1,18 +1,54 @@
 #!/bin/python
 
-# Creates two csv files for Gephi of groups and their users. One contains data for the nodes, the other for the edges. Both should be imported into Gephi. This currently doesn't support nested groups, but that can be added
+# Creates two csv files for Gephi of groups and their users.
+# One contains data for the nodes, the other for the edges.
+# An input file needs to be given as an argument.
+# This file should generated with the following command:
+# sacct --starttime MMDDYY -a -P -n -s CD -o User,Account,CPUTimeRAW > input_file
+# Replace MMDDYY with the date of when you want data collected back to.
+# This currently doesn't support nested groups, but that can be added
 import ldap
 import csv
+import sys
 
 
 # Options
-# If true, include the ARCC Group in the plot 
+# If true, include the ARCC Group in the plot
 includeARCCGroup = False
 # If true, include the ARCC Intern Group in the plot
 includeARCCInternGroup = False
-# If true, include username label's on username nodes. With them, the plot looks much messier. Even with them off, their ID's are still set to their username. In overview you can display ID's on nodes. This isn't an option in preview however, so if you want them displayed in preview, set this to True.
-usernamelabels = False 
+# If true, include username label's on username nodes.
+# Even with them off, their ID's are still set to their username.
+# These can be displayed in overview. but not preview.
+# If you want them in preview, set this to True.
+usernamelabels = False
 
+# Get cputime per user and account
+# Assume that only argument will be the file with the cpu time data.
+try:
+    with open(sys.argv[1], 'r') as data:
+        lines = data.readlines()
+except:
+    print "No input file given or file doesn't exist, exiting..."
+    sys.exit()
+
+users = {}
+accts = {}
+total = 0
+
+# Read input file
+for line in lines:
+    line = line.strip().split('|')
+    if line[0]:
+        acct = line[1]
+        user = line[0]
+        cput = int(line[2])
+        total += cput
+        accts[acct] = accts.get(acct, 0) + cput
+        users[user] = users.get(user, 0) + cput
+
+max_users = float(max(users.values()))
+max_accts = float(max(accts.values()))
 
 
 # LDAP Server
@@ -22,58 +58,77 @@ srv = 'ldap://arccidm1.arcc.uwyo.edu'
 ad = ldap.initialize(srv)
 
 # Make TLS connection to LDAP server.
-# best practice is probably to try/except this, but since this is just a script and isn't gonna be used by any end users I won't do that for now.
+# best practice is probably to try/except this.
 ad.start_tls_s()
 ad.simple_bind_s()
 
 # Open up edges CSV file.
 edgesf = open('edges.csv', 'wb')
 edges = csv.writer(edgesf, delimiter=',')
-# Edge files must have Target and Source as their header. Target is the target of the node, source is the source. The way this is set up, users will be the source, groups will be the target. To reverse this, simply switch Target and Source Below.
-edges.writerow(["Target" , "Source"])
+
+# Edge files must have Target and Source as their header.
+# The way this is set up, users will be the source, groups will be the target.
+# To reverse this, simply switch Target and Source Below.
+edges.writerow(["Target", "Source"])
 
 # Open up nodes CSV file.
 nodesf = open('nodes.csv', 'wb')
 nodes = csv.writer(nodesf, delimiter=',')
-# The nodes file holds the info on each node. The ID can be anything, but I've made it the cn (username/groupname), the Label is the label of the node, it's what get displayed on the node (also the groupname and username if that option is enabled above), Color is 0 or 1, depending on if the node is a user or group, it's used to set the Color of the node in Gephi, and finally, the Size is just an integer that is used to set the size of the node in Gephi
-nodes.writerow(["ID" , "Label", "Color", "SizeN"])
 
-# Perform a search on the server to get the groups that are subgroups of mountmoran. This returns a lot of information on the groups, including the users. 
+# The nodes file holds the info on each node
+# The ID can be anything, I've made it the group name/username
+# The Label is the label of the node, it's what get displayed on the node
+# Color is between 0 or 1, used to make a heatmap
+# The Size is just an integer that is used to set the size of the node
+# The type distinguishes between group and user. Users are 0, groups are 1
+nodes.writerow(["ID", "Label", "Color", "SizeN", "Type"])
+
+# Perform a search on the server to get subgroups of Mt Moran
+# This returns a lot of information on the groups, including the users
 base_dn = 'dc=arcc,dc=uwyo,dc=edu'
-filter_dn = 'memberOf=cn=mountmoran,cn=groups,cn=accounts,dc=arcc,dc=uwyo,dc=edu'
-groups =  ad.search_s(base_dn, ldap.SCOPE_SUBTREE, filter_dn)
+filt = 'memberOf=cn=mountmoran,cn=groups,cn=accounts,dc=arcc,dc=uwyo,dc=edu'
+groups = ad.search_s(base_dn, ldap.SCOPE_SUBTREE, filt)
 
 for group in groups:
     # get the group name
     g_name = group[1]['cn'][0]
 
-    # Skip arcc or arccintern groups depending on the options set at the beginning
-    if (g_name == "arcc" and not includeARCCGroup) or (g_name == "arccinterns" and not includeARCCInternGroup):
+    # Skip arcc or arccintern groups depending on the options set at the top
+    if (g_name == "arcc" and not includeARCCGroup) or \
+       (g_name == "arccinterns" and not includeARCCInternGroup):
         continue
 
     # get a list of members of group (users and subgroups)
     members = group[1]['member']
-    # Write the info for the group in the node file. The group name goes twice, because it's the ID and Label, a 1 is set for color, and finally the Size is simply the number of members the group has plus 2. (That way, groups are always larger then users)
-    nodes.writerow([g_name] * 2 + [1] + [len(members)+2])
-    
+
+    # Write the info for the group in the node file.
+    # The group name goes twice, because it's the label and ID.
+    # Then goes the 'Color' field, which contains the CPU time used on Mt Moran
+    # Last, there is the size field. It is the number of members in the group
+    # plus 2 to make group nodes always larger then user nodes.
+    row = [g_name, g_name, accts.get(g_name, 0)/max_accts, len(members) + 2, 1]
+    nodes.writerow(row)
+
     # Go through the members, add them to the data file.
     for member in members:
+        # Get the username
         uidi = member.find("uid=")
-        user = (member[uidi+4:member.find(",",uidi)])
-        # Write the edge from user to group.
-        edges.writerow([g_name, user]) 
-        # Write the node info for the users
-        if usernamelabels:
-            nodes.writerow([user] * 2 + ["0"] + ["1"]) 
-        else:
-            nodes.writerow([user] + [" "] + ["0"] + ["1"]) 
+        user = (member[uidi+4:member.find(",", uidi)])
 
+        # Write the edge from user to group.
+        edges.writerow([g_name, user])
+
+        # Write the node info for the users
+        row = [user,
+               user if usernamelabels else " ",
+               users.get(user, 0)/max_users,
+               1, 0]
+        nodes.writerow(row)
 
 
 # Close the CSV files
 nodesf.close()
 edgesf.close()
-
 
 # Disconnect from the server
 ad.unbind()
