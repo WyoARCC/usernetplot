@@ -3,24 +3,27 @@
 # Creates two csv files for Gephi of groups and their users.
 # One contains data for the nodes, the other for the edges.
 # An input file needs to be given as an argument.
-# This file should generated with the following command:
-# sacct --starttime MMDDYY -a -P -n -s CD -o User,Account,CPUTimeRAW > input_file
+# This file should be generated with the following command:
+# sacct --starttime MMDDYY -a -P -n -s CD -o User,Account,CPUTimeRAW > input_f
 # Replace MMDDYY with the date of when you want data collected back to.
-# This currently doesn't support nested groups, but that can be added
+# This currently doesn't support nested groups.
 import ldap
 import csv
 import sys
 
 
 # Options
-# If true, include the ARCC Group in the plot
-includeARCCGroup = False
-# If true, include the ARCC Intern Group in the plot
-includeARCCInternGroup = False
+groupsToSkip = ['arcc', 'arccinterns', 'bc-201606']
+
+# ARCC employees are members of other projects/groups. If you want them
+# displayed, set this to True.
+includeARCCUsers = False
+
 # If true, include username label's on username nodes.
 # Even with them off, their ID's are still set to their username.
 # These can be displayed in overview. but not preview.
 # If you want them in preview, set this to True.
+# This is off by default, because the plot is messy with them on.
 usernamelabels = False
 
 # Get cputime per user and account
@@ -78,7 +81,7 @@ nodes = csv.writer(nodesf, delimiter=',')
 # The nodes file holds the info on each node
 # The ID can be anything, I've made it the group name/username
 # The Label is the label of the node, it's what get displayed on the node
-# Color is between 0 or 1, used to make a heatmap
+# Color is float between 0 or 1, used to make a heatmap
 # The Size is just an integer that is used to set the size of the node
 # The type distinguishes between group and user. Users are 0, groups are 1
 nodes.writerow(["ID", "Label", "Color", "SizeN", "Type"])
@@ -89,18 +92,23 @@ base_dn = 'dc=arcc,dc=uwyo,dc=edu'
 filt = 'memberOf=cn=mountmoran,cn=groups,cn=accounts,dc=arcc,dc=uwyo,dc=edu'
 groups = ad.search_s(base_dn, ldap.SCOPE_SUBTREE, filt)
 
+# Get a list of ARCC users from the ARCC Interns and ARCC groups.
+# This is a really messy way of doing it with list comprehension.
+skip = [member for members in [group[1]['member'] for group in groups
+        if group[1]['cn'][0] == 'arcc' or group[1]['cn'][0] == 'arccinterns']
+        for member in members]
+
+
 for group in groups:
     # get the group name
     g_name = group[1]['cn'][0]
 
-    # Skip arcc or arccintern groups depending on the options set at the top
-    if (g_name == "arcc" and not includeARCCGroup) or \
-       (g_name == "arccinterns" and not includeARCCInternGroup):
-        continue
-
     # get a list of members of group (users and subgroups)
     members = group[1]['member']
 
+    # Skip groups in groupsToSkip.
+    if g_name in groupsToSkip:
+        continue
     # Write the info for the group in the node file.
     # The group name goes twice, because it's the label and ID.
     # Then goes the 'Color' field, which contains the CPU time used on Mt Moran
@@ -111,6 +119,10 @@ for group in groups:
 
     # Go through the members, add them to the data file.
     for member in members:
+        # Skip ARCC Users if includeARCCUsers is False.
+        if not includeARCCUsers and member in skip:
+            continue
+
         # Get the username
         uidi = member.find("uid=")
         user = (member[uidi+4:member.find(",", uidi)])
